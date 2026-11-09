@@ -1,0 +1,148 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Shop TV</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;cursor:none}
+  img,video{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;display:none}
+  body.fill img,body.fill video{object-fit:cover}
+  #msg{color:#888;font:28px sans-serif;text-align:center;padding-top:40vh}
+</style>
+</head>
+<body>
+<div id="msg">Loading...</div>
+<img id="img" alt="">
+<video id="vid" muted playsinline></video>
+<script>
+// ES5 on purpose: old TV browsers.
+var SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwvGAlJkXuQZnaiQZhrakIRim_cuoq7M3R4DTDYwTsP44QpyEiR_wmldYeQCKRlV-ni3Q/exec';
+var REFRESH_MS = 5 * 60 * 1000;
+
+var list = [], idx = 0, secs = 10, paused = false, timer = null;
+var img = document.getElementById('img');
+var vid = document.getElementById('vid');
+var msg = document.getElementById('msg');
+
+function show(el) { img.style.display = el === img ? 'block' : 'none'; vid.style.display = el === vid ? 'block' : 'none'; }
+
+function next(step) {
+  if (!list.length) return;
+  idx = (idx + (step || 1) + list.length) % list.length;
+  play();
+}
+
+function play() {
+  clearTimeout(timer);
+  vid.pause();
+  if (!list.length) { img.style.display = vid.style.display = 'none'; msg.style.display = 'block'; msg.innerHTML = 'No media in folder'; return; }
+  msg.style.display = 'none';
+  var it = list[idx];
+  if (it.video) {
+    show(vid);
+    var want = it.id;
+    getVideo(want, function (url) {
+      if (!list[idx] || list[idx].id !== want) return; // user skipped meanwhile
+      if (!url) return vid.onerror();
+      vid.src = url;
+      if (!paused) vid.play();
+    });
+  } else {
+    show(img);
+    img.src = 'https://lh3.googleusercontent.com/d/' + it.id + '=w1920';
+    if (!paused) timer = setTimeout(next, secs * 1000);
+  }
+  prefetch();
+}
+
+// Video cache: id -> blob URL. Drive blocks direct video loads from other sites,
+// so Apps Script hands us the bytes (base64). Keeps current + next 3 videos only.
+// ponytail: in memory, lost on page reload; use Cache API/IndexedDB if reloads matter
+var cache = {}, waiting = {}, AHEAD = 3;
+
+function getVideo(id, cb) {
+  if (cache[id]) return cb(cache[id]);
+  if (waiting[id]) return waiting[id].push(cb);
+  waiting[id] = [cb];
+  function done(url) {
+    var cbs = waiting[id];
+    delete waiting[id];
+    if (url) cache[id] = url;
+    for (var i = 0; i < cbs.length; i++) cbs[i](url);
+  }
+  var x = new XMLHttpRequest();
+  x.open('GET', SCRIPT_URL + '?id=' + id);
+  x.onload = function () {
+    var r, bin;
+    try { r = JSON.parse(x.responseText); bin = atob(r.b64); } catch (err) { return done(null); }
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    done(URL.createObjectURL(new Blob([bytes], { type: r.mime })));
+  };
+  x.onerror = function () { done(null); };
+  x.send();
+}
+
+function prefetch() {
+  var keep = {}, n, it, id;
+  for (n = 0; n <= AHEAD && n < list.length; n++) {
+    it = list[(idx + n) % list.length];
+    if (it.video) { keep[it.id] = 1; getVideo(it.id, function () {}); }
+  }
+  for (id in cache) if (!keep[id]) { URL.revokeObjectURL(cache[id]); delete cache[id]; }
+}
+
+vid.onended = function () { if (!paused) next(); };
+// broken file: skip after 2s so one bad file never freezes the loop
+vid.onerror = img.onerror = function () { clearTimeout(timer); timer = setTimeout(next, 2000); };
+
+function togglePause() {
+  paused = !paused;
+  if (paused) { clearTimeout(timer); vid.pause(); }
+  else if (list.length && list[idx].video) vid.play();
+  else timer = setTimeout(next, secs * 1000);
+}
+
+function fullscreen() {
+  var d = document, e = d.documentElement;
+  var on = d.fullscreenElement || d.webkitFullscreenElement;
+  if (on) (d.exitFullscreen || d.webkitExitFullscreen).call(d);
+  else (e.requestFullscreen || e.webkitRequestFullscreen || function () {}).call(e);
+}
+
+// remote: OK=fullscreen, left/right=prev/next, 0=pause, 1-9 = 5..45 s per photo
+document.onkeydown = function (e) {
+  var k = e.keyCode;
+  if (k === 13) fullscreen();
+  else if (k === 38) document.body.classList.toggle('fill'); // up: fit <-> fill screen
+  else if (k === 37) next(-1);
+  else if (k === 39) next(1);
+  else if (k === 48 || k === 96) togglePause();
+  else if (k >= 49 && k <= 57) secs = (k - 48) * 5;
+  else if (k >= 97 && k <= 105) secs = (k - 96) * 5;
+};
+document.onclick = fullscreen;
+
+function load() {
+  var x = new XMLHttpRequest();
+  x.open('GET', SCRIPT_URL);
+  x.onload = function () {
+    var data;
+    try { data = JSON.parse(x.responseText); } catch (err) { return; }
+    var cur = list[idx] && list[idx].id, first = !list.length;
+    if (JSON.stringify(data) === JSON.stringify(list)) return;
+    list = data;
+    var at = -1;
+    for (var i = 0; i < list.length; i++) if (list[i].id === cur) at = i;
+    idx = at >= 0 ? at : 0;
+    if (first || at < 0) play(); // keep playing current item if still present
+  };
+  x.send();
+}
+
+load();
+setInterval(load, REFRESH_MS);
+</script>
+</body>
+</html>
